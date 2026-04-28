@@ -156,6 +156,13 @@ import {
   type SessionCompactionPolicy,
 } from "@paperclipai/adapter-utils";
 import {
+  compressContext,
+  compressTaskDescription,
+  getCompressionStats,
+  type CompressibleComment,
+  type CompressibleContext,
+} from "./context-compression.js";
+import {
   readPaperclipSkillSyncPreference,
   writePaperclipSkillSyncPreference,
 } from "@paperclipai/adapter-utils/server-utils";
@@ -7088,7 +7095,15 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       resolvedConfig,
       runScopedMentionedSkillKeys,
     );
-    const runtimeSkillEntries = await companySkills.listRuntimeSkillEntries(agent.companyId);
+
+    // 获取期望技能（不含 required，required 在 listRuntimeSkillEntries 内部处理）
+    const skillPreference = readPaperclipSkillSyncPreference(effectiveResolvedConfig);
+    const filterKeys = skillPreference.explicit ? skillPreference.desiredSkills : undefined;
+
+    const runtimeSkillEntries = await companySkills.listRuntimeSkillEntries(
+      agent.companyId,
+      { filterKeys },
+    );
     let runtimeConfig = {
       ...effectiveResolvedConfig,
       paperclipRuntimeSkills: runtimeSkillEntries,
@@ -7659,6 +7674,67 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           "local agent jwt secret missing or invalid; running without injected PAPERCLIP_API_KEY",
         );
       }
+
+      // ── Context Compression ──
+      // Compress context to reduce token consumption before passing to adapter.
+      // Applies time decay, relevance scoring, and smart truncation.
+      try {
+        const wakePayload = context[PAPERCLIP_WAKE_PAYLOAD_KEY] as Record<string, unknown> | undefined;
+        const compressibleCtx: CompressibleContext = {
+          comments: Array.isArray(wakePayload?.comments) ? wakePayload.comments as CompressibleComment[] : [],
+          taskDescription: context.paperclipTaskMarkdown as string | null ?? null,
+          continuationSummaryBody: (context.paperclipContinuationSummary as Record<string, unknown> | undefined)?.body as string | null ?? null,
+          sessionHandoffMarkdown: context.paperclipSessionHandoffMarkdown as string | null ?? null,
+          wakeReason: context.wakeReason as string | null ?? null,
+          issueTitle: (context.paperclipIssue as Record<string, unknown> | undefined)?.title as string | null ?? null,
+          issueStatus: (context.paperclipIssue as Record<string, unknown> | undefined)?.status as string | null ?? null,
+        };
+
+        const compressed = compressContext(compressibleCtx, {
+          enableTimeDecay: true,
+          enableRelevanceScoring: true,
+          enableCaching: true,
+        });
+
+        // Update context with compressed values
+        if (wakePayload && compressed.comments.length !== compressibleCtx.comments.length ||
+            compressed.stats.compressedCommentChars < compressed.stats.originalCommentChars) {
+          (context[PAPERCLIP_WAKE_PAYLOAD_KEY] as Record<string, unknown>).comments = compressed.comments;
+        }
+        if (compressed.taskDescription !== compressibleCtx.taskDescription) {
+          context.paperclipTaskMarkdown = compressed.taskDescription;
+        }
+        if (compressed.continuationSummaryBody !== compressibleCtx.continuationSummaryBody && context.paperclipContinuationSummary) {
+          (context.paperclipContinuationSummary as Record<string, unknown>).body = compressed.continuationSummaryBody;
+        }
+        if (compressed.sessionHandoffMarkdown !== compressibleCtx.sessionHandoffMarkdown) {
+          context.paperclipSessionHandoffMarkdown = compressed.sessionHandoffMarkdown;
+        }
+
+        const stats = getCompressionStats(compressed);
+        if (stats.percentSaved > 0) {
+          logger.debug(
+            {
+              companyId: agent.companyId,
+              agentId: agent.id,
+              runId: run.id,
+              originalChars: stats.totalOriginalChars,
+              compressedChars: stats.totalCompressedChars,
+              percentSaved: stats.percentSaved,
+              commentsDropped: compressed.stats.commentsDropped,
+              cacheHit: compressed.stats.cacheHit,
+            },
+            "context compression applied",
+          );
+        }
+      } catch (compressionError) {
+        // Compression is best-effort; never fail a run because of it
+        logger.warn(
+          { err: compressionError, runId: run.id },
+          "context compression failed; using uncompressed context",
+        );
+      }
+
       const adapterResult = await adapter.execute({
         runId: run.id,
         agent,

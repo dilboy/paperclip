@@ -147,6 +147,7 @@ export type ProjectSkillScanTarget = {
 
 type RuntimeSkillEntryOptions = {
   materializeMissing?: boolean;
+  filterKeys?: string[];
 };
 
 const skillInventoryRefreshPromises = new Map<string, Promise<void>>();
@@ -2169,8 +2170,17 @@ export function companySkillService(db: Db) {
   ): Promise<PaperclipSkillEntry[]> {
     const skills = await listFull(companyId);
 
+    // 如果提供了 filterKeys，只保留 required 技能 + 明确期望的技能
+    const filteredSkills = options.filterKeys
+      ? skills.filter((skill) => {
+          const sourceKind = asString(getSkillMeta(skill).sourceKind);
+          const isRequired = sourceKind === "paperclip_bundled";
+          return isRequired || options.filterKeys!.includes(skill.key);
+        })
+      : skills;
+
     const out: PaperclipSkillEntry[] = [];
-    for (const skill of skills) {
+    for (const skill of filteredSkills) {
       const sourceKind = asString(getSkillMeta(skill).sourceKind);
       let source = normalizeSkillDirectory(skill);
       if (!source) {
