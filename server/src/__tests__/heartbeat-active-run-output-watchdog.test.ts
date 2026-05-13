@@ -7,6 +7,7 @@ import {
   createDb,
   heartbeatRunWatchdogDecisions,
   heartbeatRuns,
+  issueComments,
   issueRelations,
   issues,
 } from "@paperclipai/db";
@@ -186,7 +187,7 @@ describeEmbeddedPostgres("active-run output watchdog", () => {
 
   it("creates one medium-priority evaluation issue for a suspicious silent run", async () => {
     const now = new Date("2026-04-22T20:00:00.000Z");
-    const { companyId, managerId, runId } = await seedRunningRun({
+    const { companyId, managerId, coderId, runId } = await seedRunningRun({
       now,
       ageMs: ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS + 60_000,
     });
@@ -210,7 +211,7 @@ describeEmbeddedPostgres("active-run output watchdog", () => {
       assigneeAgentId: managerId,
       assigneeAdapterOverrides: { modelProfile: "cheap" },
       originId: runId,
-      originFingerprint: `stale_active_run:${companyId}:${runId}`,
+      originFingerprint: `stale_active_run:${companyId}:${coderId}:2026-04-22`,
     });
     expect(evaluations[0]?.description).toContain("Decision Checklist");
     expect(evaluations[0]?.description).not.toContain("sk-test-secret-value");
@@ -300,7 +301,7 @@ describeEmbeddedPostgres("active-run output watchdog", () => {
 
   it("records watchdog decisions through recovery owner authorization", async () => {
     const now = new Date("2026-04-22T20:00:00.000Z");
-    const { companyId, managerId, runId } = await seedRunningRun({
+    const { companyId, managerId, coderId, runId } = await seedRunningRun({
       now,
       ageMs: ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS + 60_000,
     });
@@ -340,6 +341,7 @@ describeEmbeddedPostgres("active-run output watchdog", () => {
     await expect(recovery.buildRunOutputSilence({
       id: runId,
       companyId,
+      agentId: coderId,
       status: "running",
       lastOutputAt: null,
       lastOutputSeq: 0,
@@ -459,7 +461,7 @@ describeEmbeddedPostgres("active-run output watchdog", () => {
       identifier: `${issuePrefix}-21`,
       originKind: "stale_active_run_evaluation",
       originId: otherRunId,
-      originFingerprint: `stale_active_run:${companyId}:${otherRunId}`,
+      originFingerprint: `stale_active_run:${companyId}:${managerId}:2026-04-22`,
     });
 
     const attempts = [
@@ -546,5 +548,71 @@ describeEmbeddedPostgres("active-run output watchdog", () => {
       createdByRunId: randomUUID(),
     });
     expect(decision.createdByRunId).toBe(managerRunId);
+  });
+
+  it("aggregates same-agent same-day silent runs into one rolling evaluation issue with appended comments", async () => {
+    const now = new Date("2026-04-22T20:00:00.000Z");
+    const { companyId, coderId } = await seedRunningRun({
+      now,
+      ageMs: ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS + 60_000,
+    });
+    const heartbeat = heartbeatService(db);
+
+    const extraRunIds: string[] = [];
+    for (let i = 0; i < 2; i += 1) {
+      const extraRunId = randomUUID();
+      extraRunIds.push(extraRunId);
+      const startedAt = new Date(now.getTime() - ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS - 120_000 - i * 1_000);
+      await db.insert(heartbeatRuns).values({
+        id: extraRunId,
+        companyId,
+        agentId: coderId,
+        status: "running",
+        invocationSource: "assignment",
+        triggerDetail: "system",
+        startedAt,
+        processStartedAt: startedAt,
+        lastOutputAt: null,
+        lastOutputSeq: 0,
+        lastOutputStream: null,
+        errorCode: i === 0 ? "claude_transient_upstream" : null,
+        contextSnapshot: {},
+        logBytes: 0,
+      });
+    }
+
+    const result = await heartbeat.scanSilentActiveRuns({ now, companyId });
+
+    expect(result.scanned).toBe(3);
+    expect(result.created).toBe(1);
+    expect(result.existing + result.escalated).toBe(2);
+
+    const evaluations = await db
+      .select()
+      .from(issues)
+      .where(and(eq(issues.companyId, companyId), eq(issues.originKind, "stale_active_run_evaluation")));
+    expect(evaluations).toHaveLength(1);
+    expect(evaluations[0]?.originFingerprint).toBe(`stale_active_run:${companyId}:${coderId}:2026-04-22`);
+
+    const comments = await db
+      .select()
+      .from(issueComments)
+      .where(eq(issueComments.issueId, evaluations[0]!.id));
+    const aggregationComments = comments.filter((comment) =>
+      comment.body.includes("Aggregated additional silent-run trigger")
+      || comment.body.includes("Silent-run review issue re-triggered"),
+    );
+    expect(aggregationComments.length).toBeGreaterThanOrEqual(2);
+    const triggerRunIds = aggregationComments
+      .map((comment) => comment.createdByRunId)
+      .filter((value): value is string => Boolean(value));
+    for (const extraRunId of extraRunIds) {
+      expect(triggerRunIds).toContain(extraRunId);
+    }
+
+    const errorCodeComment = aggregationComments.find((comment) =>
+      comment.body.includes("Error code: `claude_transient_upstream`"),
+    );
+    expect(errorCodeComment).toBeTruthy();
   });
 });

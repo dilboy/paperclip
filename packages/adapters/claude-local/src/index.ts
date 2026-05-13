@@ -49,6 +49,7 @@ Core fields:
 Operational fields:
 - timeoutSec (number, optional): run timeout in seconds
 - graceSec (number, optional): SIGTERM grace period in seconds
+- terminalResultCleanupGraceMs (number, optional, default 60000): idle-after-result grace period in milliseconds. Once the Claude CLI emits its terminal \`result\` block, the adapter arms a timer to kill the child if it has not exited normally. Mitigates a known Claude Code SDK bug where the underlying HTTPS socket stays open after a successful run. Override per-run via this field, or operator-wide via the \`PAPERCLIP_CLAUDE_LOCAL_IDLE_AFTER_RESULT_MS\` env var (env wins over config).
 
 Notes:
 - When Paperclip realizes a workspace/runtime for a run, it injects PAPERCLIP_WORKSPACE_* and PAPERCLIP_RUNTIME_* env vars for agent-side tooling.

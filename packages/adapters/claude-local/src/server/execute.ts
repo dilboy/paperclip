@@ -64,6 +64,39 @@ import { SANDBOX_INSTALL_COMMAND } from "../index.js";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
 
+// Mitigation for CMPA-397-class post-completion hang: the Claude Code SDK can
+// emit its terminal `result` block and then leave the underlying HTTPS socket
+// open, so the adapter child stays alive without producing more output. The
+// watchdog then flags the run as a silent active run ~1h later. We arm an
+// "idle-after-result" timer once the result is observed so the child is killed
+// promptly while still being treated as a successful run. The grace defaults
+// to 60s and can be overridden per-run via config.terminalResultCleanupGraceMs
+// or operator-wide via the PAPERCLIP_CLAUDE_LOCAL_IDLE_AFTER_RESULT_MS env var
+// (env wins over config so operators can tune without redeploying agents).
+export const IDLE_AFTER_RESULT_ENV = "PAPERCLIP_CLAUDE_LOCAL_IDLE_AFTER_RESULT_MS";
+export const DEFAULT_IDLE_AFTER_RESULT_MS = 60_000;
+
+function parseIdleAfterResultMs(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value) && value >= 0) return value;
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return null;
+  const parsed = Number(trimmed);
+  if (!Number.isFinite(parsed) || parsed < 0) return null;
+  return parsed;
+}
+
+export function resolveIdleAfterResultMs(
+  config: Record<string, unknown>,
+  env: NodeJS.ProcessEnv,
+): number {
+  const fromEnv = parseIdleAfterResultMs(env[IDLE_AFTER_RESULT_ENV]);
+  if (fromEnv !== null) return fromEnv;
+  const fromConfig = parseIdleAfterResultMs(config.terminalResultCleanupGraceMs);
+  if (fromConfig !== null) return fromConfig;
+  return DEFAULT_IDLE_AFTER_RESULT_MS;
+}
+
 interface ClaudeExecutionInput {
   runId: string;
   agent: AdapterExecutionContext["agent"];
@@ -413,10 +446,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   } = runtimeConfig;
   let loggedEnv = initialLoggedEnv;
   let effectiveExecutionCwd = adapterExecutionTargetRemoteCwd(executionTarget, cwd);
-  const terminalResultCleanupGraceMs = Math.max(
-    0,
-    asNumber(config.terminalResultCleanupGraceMs, 5_000),
-  );
+  const terminalResultCleanupGraceMs = resolveIdleAfterResultMs(config, process.env);
   const effectiveEnv = Object.fromEntries(
     Object.entries({ ...process.env, ...env }).filter(
       (entry): entry is [string, string] => typeof entry[1] === "string",

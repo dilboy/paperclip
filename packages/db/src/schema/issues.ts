@@ -116,10 +116,10 @@ export const issues = pgTable(
           and ${table.status} not in ('done', 'cancelled')`,
       ),
     activeStaleRunEvaluationIdx: uniqueIndex("issues_active_stale_run_evaluation_uq")
-      .on(table.companyId, table.originKind, table.originId)
+      .on(table.companyId, table.originKind, table.originFingerprint)
       .where(
         sql`${table.originKind} = 'stale_active_run_evaluation'
-          and ${table.originId} is not null
+          and ${table.originFingerprint} <> 'default'
           and ${table.hiddenAt} is null
           and ${table.status} not in ('done', 'cancelled')`,
       ),

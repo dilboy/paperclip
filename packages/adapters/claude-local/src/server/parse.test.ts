@@ -63,6 +63,83 @@ describe("isClaudeTransientUpstreamError", () => {
     ).toBe(true);
   });
 
+  it("classifies socket / network disconnect errors as transient", () => {
+    // Required by CMPA-414: socket connection closed unexpectedly.
+    expect(
+      isClaudeTransientUpstreamError({
+        stderr: "Error: socket connection was closed unexpectedly",
+      }),
+    ).toBe(true);
+    // Required by CMPA-414: ECONNRESET (Node transport reset).
+    expect(
+      isClaudeTransientUpstreamError({
+        stderr: "Error: read ECONNRESET",
+      }),
+    ).toBe(true);
+    // Required by CMPA-414: Request timed out.
+    expect(
+      isClaudeTransientUpstreamError({
+        stderr: "Anthropic API error: Request timed out after 60s",
+      }),
+    ).toBe(true);
+    // Additional SDK transport-layer transients we want to cover.
+    expect(
+      isClaudeTransientUpstreamError({
+        stderr: "Error: socket hang up",
+      }),
+    ).toBe(true);
+    expect(
+      isClaudeTransientUpstreamError({
+        stderr: "write EPIPE",
+      }),
+    ).toBe(true);
+    expect(
+      isClaudeTransientUpstreamError({
+        stderr: "connect ETIMEDOUT 10.0.0.1:443",
+      }),
+    ).toBe(true);
+    expect(
+      isClaudeTransientUpstreamError({
+        stderr: "getaddrinfo EAI_AGAIN api.anthropic.com",
+      }),
+    ).toBe(true);
+    expect(
+      isClaudeTransientUpstreamError({
+        errorMessage: "TypeError: Failed to fetch",
+      }),
+    ).toBe(true);
+    expect(
+      isClaudeTransientUpstreamError({
+        errorMessage: "TypeError: fetch failed",
+      }),
+    ).toBe(true);
+    expect(
+      isClaudeTransientUpstreamError({
+        stderr: "Premature close",
+      }),
+    ).toBe(true);
+  });
+
+  it("classifies stderr-only transport failures even when no result block was parsed", () => {
+    // Mirrors the execute.ts path where parsed=null because stream-json never
+    // produced a result block and the failure signal is only on stderr.
+    expect(
+      isClaudeTransientUpstreamError({
+        parsed: null,
+        stdout: "",
+        stderr: "node:internal/streams/destroy: socket hang up\n  code: 'ECONNRESET'",
+      }),
+    ).toBe(true);
+    expect(
+      isClaudeTransientUpstreamError({
+        parsed: null,
+        stdout: "",
+        stderr: "request timeout",
+        errorMessage: "Claude exited with code 1: request timeout",
+      }),
+    ).toBe(true);
+  });
+
   it("does not classify login/auth failures as transient", () => {
     expect(
       isClaudeTransientUpstreamError({

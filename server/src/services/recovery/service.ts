@@ -61,7 +61,7 @@ import { isAutomaticRecoverySuppressedByPauseHold } from "./pause-hold-guard.js"
 
 const EXECUTION_PATH_HEARTBEAT_RUN_STATUSES = ["queued", "running", "scheduled_retry"] as const;
 const UNSUCCESSFUL_HEARTBEAT_RUN_TERMINAL_STATUSES = ["failed", "cancelled", "timed_out"] as const;
-export const ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS = 60 * 60 * 1000;
+export const ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS = 2 * 60 * 60 * 1000;
 export const ACTIVE_RUN_OUTPUT_CRITICAL_THRESHOLD_MS = 4 * 60 * 60 * 1000;
 export const ACTIVE_RUN_OUTPUT_CONTINUE_REARM_MS = 30 * 60 * 1000;
 const ACTIVE_RUN_OUTPUT_EVIDENCE_TAIL_BYTES = 8 * 1024;
@@ -669,8 +669,29 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       .then((rows) => rows[0]?.issuePrefix ?? "PAP");
   }
 
-  function staleActiveRunOriginFingerprint(companyId: string, runId: string) {
-    return `stale_active_run:${companyId}:${runId}`;
+  function staleActiveRunDayKey(date: Date) {
+    const iso = date.toISOString();
+    return iso.slice(0, 10);
+  }
+
+  function staleActiveRunOriginFingerprint(companyId: string, agentId: string, dayKey: string) {
+    return `stale_active_run:${companyId}:${agentId}:${dayKey}`;
+  }
+
+  function parseStaleActiveRunOriginFingerprint(value: string | null | undefined) {
+    if (!value) return null;
+    const parts = value.split(":");
+    if (parts.length !== 4 || parts[0] !== "stale_active_run") return null;
+    const [, companyId, agentId, dayKey] = parts;
+    if (!companyId || !agentId || !dayKey) return null;
+    return { companyId, agentId, dayKey };
+  }
+
+  function staleActiveRunOriginFingerprintForRun(
+    run: Pick<typeof heartbeatRuns.$inferSelect, "companyId" | "agentId">,
+    now: Date,
+  ) {
+    return staleActiveRunOriginFingerprint(run.companyId, run.agentId, staleActiveRunDayKey(now));
   }
 
   function silenceStartedAtForRun(run: Pick<typeof heartbeatRuns.$inferSelect, "lastOutputAt" | "processStartedAt" | "startedAt" | "createdAt">) {
@@ -699,7 +720,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     return row ?? null;
   }
 
-  async function findOpenStaleRunEvaluation(companyId: string, runId: string) {
+  async function findOpenStaleRunEvaluation(companyId: string, fingerprint: string) {
     const [row] = await db
       .select({
         id: issues.id,
@@ -707,6 +728,9 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         status: issues.status,
         priority: issues.priority,
         assigneeAgentId: issues.assigneeAgentId,
+        originId: issues.originId,
+        originRunId: issues.originRunId,
+        originFingerprint: issues.originFingerprint,
         updatedAt: issues.updatedAt,
       })
       .from(issues)
@@ -714,11 +738,12 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         and(
           eq(issues.companyId, companyId),
           eq(issues.originKind, STALE_ACTIVE_RUN_EVALUATION_ORIGIN_KIND),
-          eq(issues.originId, runId),
+          eq(issues.originFingerprint, fingerprint),
           isNull(issues.hiddenAt),
           notInArray(issues.status, ["done", "cancelled"]),
         ),
       )
+      .orderBy(desc(issues.createdAt))
       .limit(1);
     return row ?? null;
   }
@@ -726,13 +751,14 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
   async function buildRunOutputSilence(
     run: Pick<
       typeof heartbeatRuns.$inferSelect,
-      "id" | "companyId" | "status" | "lastOutputAt" | "lastOutputSeq" | "lastOutputStream" | "processStartedAt" | "startedAt" | "createdAt"
+      "id" | "companyId" | "agentId" | "status" | "lastOutputAt" | "lastOutputSeq" | "lastOutputStream" | "processStartedAt" | "startedAt" | "createdAt"
     >,
     now = new Date(),
   ): Promise<RunOutputSilenceSummary> {
+    const fingerprint = staleActiveRunOriginFingerprintForRun(run, now);
     const [quietUntilDecision, evaluation] = await Promise.all([
       latestActiveOutputQuietUntilDecision(run.companyId, run.id, now),
-      findOpenStaleRunEvaluation(run.companyId, run.id),
+      findOpenStaleRunEvaluation(run.companyId, fingerprint),
     ]);
     const silenceStartedAt = silenceStartedAtForRun(run);
     const silenceAgeMs = run.status === "running" ? silenceAgeMsForRun(run, now) : null;
@@ -1039,8 +1065,43 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       now: input.now,
     });
     const level = (evidence.silenceAgeMs ?? 0) >= ACTIVE_RUN_OUTPUT_CRITICAL_THRESHOLD_MS ? "critical" : "suspicious";
-    const existing = await findOpenStaleRunEvaluation(input.run.companyId, input.run.id);
+    const fingerprint = staleActiveRunOriginFingerprintForRun(input.run, input.now);
+    const existing = await findOpenStaleRunEvaluation(input.run.companyId, fingerprint);
     if (existing) {
+      const seedRunId = existing.originRunId ?? existing.originId ?? null;
+      const isAggregated = seedRunId !== input.run.id;
+      const triggerCommentLines = [
+        isAggregated
+          ? "Aggregated additional silent-run trigger for the same agent/day."
+          : "Silent-run review issue re-triggered by its seed run.",
+          "",
+          `- Triggering run: \`${input.run.id}\``,
+          `- Trigger time: ${input.now.toISOString()}`,
+          `- Silent for: ${formatDuration(evidence.silenceAgeMs)}`,
+          `- Last output at: ${input.run.lastOutputAt?.toISOString() ?? "none recorded"}`,
+          `- Origin run (seed): ${seedRunId ? `\`${seedRunId}\`` : "unknown"}`,
+          `- Error code: ${input.run.errorCode ? `\`${input.run.errorCode}\`` : "none"}`,
+      ];
+      await issuesSvc.addComment(existing.id, triggerCommentLines.join("\n"), { runId: input.run.id });
+      await logActivity(db, {
+        companyId: input.run.companyId,
+        actorType: "system",
+        actorId: "system",
+        agentId: null,
+        runId: input.run.id,
+        action: "heartbeat.output_stale_aggregated",
+        entityType: "issue",
+        entityId: existing.id,
+        details: {
+          source: "recovery.scan_silent_active_runs",
+          fingerprint,
+          triggerRunId: input.run.id,
+          originRunId: seedRunId,
+          silenceAgeMs: evidence.silenceAgeMs,
+          errorCode: input.run.errorCode ?? null,
+          level,
+        },
+      });
       if (level === "critical" && existing.priority !== "high") {
         await issuesSvc.update(existing.id, {
           priority: "high",
@@ -1095,11 +1156,11 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         originKind: STALE_ACTIVE_RUN_EVALUATION_ORIGIN_KIND,
         originId: input.run.id,
         originRunId: input.run.id,
-        originFingerprint: staleActiveRunOriginFingerprint(input.run.companyId, input.run.id),
+        originFingerprint: fingerprint,
       });
     } catch (error) {
       if (!isUniqueStaleRunEvaluationConflict(error)) throw error;
-      const raced = await findOpenStaleRunEvaluation(input.run.companyId, input.run.id);
+      const raced = await findOpenStaleRunEvaluation(input.run.companyId, fingerprint);
       if (!raced) throw error;
       return { kind: "existing" as const, evaluationIssueId: raced.id };
     }
@@ -1220,6 +1281,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       companyId: string;
       originKind: string;
       originId: string | null;
+      originFingerprint: string | null;
       hiddenAt: Date | null;
       status: string;
     } | null = null;
@@ -1231,6 +1293,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           companyId: issues.companyId,
           originKind: issues.originKind,
           originId: issues.originId,
+          originFingerprint: issues.originFingerprint,
           hiddenAt: issues.hiddenAt,
           status: issues.status,
         })
@@ -1240,13 +1303,22 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       if (!evaluationIssue) throw notFound("Evaluation issue not found");
     }
 
+    const evaluationFingerprintParts = evaluationIssue
+      ? parseStaleActiveRunOriginFingerprint(evaluationIssue.originFingerprint)
+      : null;
+    const evaluationBoundToRun =
+      evaluationIssue !== null &&
+      evaluationIssue.originKind === STALE_ACTIVE_RUN_EVALUATION_ORIGIN_KIND &&
+      evaluationFingerprintParts !== null &&
+      evaluationFingerprintParts.companyId === run.companyId &&
+      evaluationFingerprintParts.agentId === run.agentId;
+
     const boardActor = input.actor.type === "board";
     const assignedRecoveryOwner =
       input.actor.type === "agent" &&
       Boolean(input.actor.agentId) &&
       evaluationIssue !== null &&
-      evaluationIssue.originKind === STALE_ACTIVE_RUN_EVALUATION_ORIGIN_KIND &&
-      evaluationIssue.originId === run.id &&
+      evaluationBoundToRun &&
       evaluationIssue.hiddenAt === null &&
       !["done", "cancelled"].includes(evaluationIssue.status) &&
       evaluationIssue?.assigneeAgentId === input.actor.agentId;
@@ -1254,10 +1326,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       throw forbidden("Only the board or the assigned recovery owner can record watchdog decisions");
     }
 
-    if (evaluationIssue && (
-      evaluationIssue.originKind !== STALE_ACTIVE_RUN_EVALUATION_ORIGIN_KIND ||
-      evaluationIssue.originId !== run.id
-    )) {
+    if (evaluationIssue && !evaluationBoundToRun) {
       throw forbidden("Watchdog decision evaluation issue is not bound to the target run");
     }
 
