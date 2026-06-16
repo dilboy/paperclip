@@ -106,6 +106,16 @@ import {
   modelProfiles as openCodeModelProfiles,
 } from "@paperclipai/adapter-opencode-local";
 import {
+  execute as miMoCodeExecute,
+  testEnvironment as miMoCodeTestEnvironment,
+  sessionCodec as miMoCodeSessionCodec,
+} from "@paperclipai/adapter-mimocode-local/server";
+import {
+  agentConfigurationDoc as miMoCodeAgentConfigurationDoc,
+  models as miMoCodeModels,
+  modelProfiles as miMoCodeModelProfiles,
+} from "@paperclipai/adapter-mimocode-local";
+import {
   execute as openclawGatewayExecute,
   testEnvironment as openclawGatewayTestEnvironment,
 } from "@paperclipai/adapter-openclaw-gateway/server";
@@ -433,6 +443,22 @@ const openCodeLocalAdapter: ServerAdapterModule = {
   agentConfigurationDoc: openCodeAgentConfigurationDoc,
 };
 
+const miMoCodeLocalAdapter: ServerAdapterModule = {
+  type: "mimocode_local",
+  execute: miMoCodeExecute,
+  testEnvironment: miMoCodeTestEnvironment,
+  sessionCodec: miMoCodeSessionCodec,
+  models: miMoCodeModels,
+  modelProfiles: miMoCodeModelProfiles,
+  sessionManagement: getAdapterSessionManagement("mimocode_local") ?? undefined,
+  supportsLocalAgentJwt: true,
+  supportsInstructionsBundle: true,
+  instructionsPathKey: "instructionsFilePath",
+  requiresMaterializedRuntimeSkills: false,
+  getRuntimeCommandSpec: (config) => buildNpmRuntimeCommandSpec(config, "mimo", "mimocode"),
+  agentConfigurationDoc: miMoCodeAgentConfigurationDoc,
+};
+
 const piLocalAdapter: ServerAdapterModule = {
   type: "pi_local",
   execute: piExecute,
@@ -541,6 +567,7 @@ function registerBuiltInAdapters() {
     claudeLocalAdapter,
     codexLocalAdapter,
     openCodeLocalAdapter,
+    miMoCodeLocalAdapter,
     piLocalAdapter,
     cursorCloudAdapter,
     cursorLocalAdapter,

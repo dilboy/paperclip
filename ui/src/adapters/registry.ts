@@ -7,6 +7,7 @@ import { cursorLocalUIAdapter } from "./cursor";
 import { geminiLocalUIAdapter } from "./gemini-local";
 import { grokLocalUIAdapter } from "./grok-local";
 import { openCodeLocalUIAdapter } from "./opencode-local";
+import { miMoCodeLocalUIAdapter } from "./mimocode-local";
 import { piLocalUIAdapter } from "./pi-local";
 import { openClawGatewayUIAdapter } from "./openclaw-gateway";
 import { hermesLocalUIAdapter } from "./hermes-local";
@@ -60,6 +61,7 @@ function registerBuiltInUIAdapters() {
     grokLocalUIAdapter,
     hermesLocalUIAdapter,
     openCodeLocalUIAdapter,
+    miMoCodeLocalUIAdapter,
     piLocalUIAdapter,
     cursorLocalUIAdapter,
     openClawGatewayUIAdapter,
