@@ -34,6 +34,7 @@ COPY packages/adapters/grok-local/package.json packages/adapters/grok-local/
 COPY packages/adapters/openclaw-gateway/package.json packages/adapters/openclaw-gateway/
 COPY packages/adapters/opencode-local/package.json packages/adapters/opencode-local/
 COPY packages/adapters/pi-local/package.json packages/adapters/pi-local/
+COPY packages/adapters/mimocode-local/package.json packages/adapters/mimocode-local/
 COPY packages/plugins/sdk/package.json packages/plugins/sdk/
 COPY --parents packages/plugins/sandbox-providers/./*/package.json packages/plugins/sandbox-providers/
 COPY packages/plugins/paperclip-plugin-fake-sandbox/package.json packages/plugins/paperclip-plugin-fake-sandbox/
@@ -48,6 +49,8 @@ FROM base AS build
 WORKDIR /app
 COPY --from=deps /app /app
 COPY . .
+RUN pnpm --filter @paperclipai/adapter-utils build
+RUN pnpm --filter @paperclipai/shared build
 RUN pnpm --filter @paperclipai/ui build
 RUN pnpm --filter @paperclipai/plugin-sdk build
 RUN pnpm --filter @paperclipai/server build
