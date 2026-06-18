@@ -107,6 +107,8 @@ import {
 } from "@paperclipai/adapter-opencode-local";
 import {
   execute as miMoCodeExecute,
+  listMiMoCodeSkills,
+  syncMiMoCodeSkills,
   testEnvironment as miMoCodeTestEnvironment,
   sessionCodec as miMoCodeSessionCodec,
 } from "@paperclipai/adapter-mimocode-local/server";
@@ -447,6 +449,8 @@ const miMoCodeLocalAdapter: ServerAdapterModule = {
   type: "mimocode_local",
   execute: miMoCodeExecute,
   testEnvironment: miMoCodeTestEnvironment,
+  listSkills: listMiMoCodeSkills,
+  syncSkills: syncMiMoCodeSkills,
   sessionCodec: miMoCodeSessionCodec,
   models: miMoCodeModels,
   modelProfiles: miMoCodeModelProfiles,

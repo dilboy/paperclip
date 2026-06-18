@@ -61,5 +61,6 @@ export const sessionCodec: AdapterSessionCodec = {
 };
 
 export { execute } from "./execute.js";
+export { listMiMoCodeSkills, syncMiMoCodeSkills } from "./skills.js";
 export { testEnvironment } from "./test.js";
 export { parseMiMoCodeJsonl, isMiMoCodeUnknownSessionError } from "./parse.js";
